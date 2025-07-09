@@ -28,10 +28,55 @@ const client = new MongoClient(uri, {
   },
 });
 
+const verifyToken = async (req, res, next) => {
+  const token = req.cookies?.token;
+
+  if (!token) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+    if (err) {
+      console.log(err);
+      return res.status(401).send({ message: "unauthorized access" });
+    }
+    req.user = decoded;
+    next();
+  });
+};
+
 async function run() {
   try {
     const godeshdb = client.db("godeshdb");
     const usersCollection = godeshdb.collection("users");
+
+    // Generate jwt token
+    app.post("/jwt", async (req, res) => {
+      const email = req.body;
+      const token = jwt.sign(email, process.env.ACCESS_TOKEN_SECRET, {
+        expiresIn: "7d",
+      });
+      res
+        .cookie("token", token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
+        })
+        .send({ success: true });
+    });
+    // Logout
+    app.get("/logout", async (_req, res) => {
+      try {
+        res
+          .clearCookie("token", {
+            maxAge: 0,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
+          })
+          .send({ success: true });
+      } catch (err) {
+        res.status(500).send(err);
+      }
+    });
 
     //Store users information
     app.put("/users", async (req, res) => {
@@ -85,6 +130,26 @@ async function run() {
         });
       } catch (error) {
         console.error("Error saving user:", error);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
+
+    //get users role
+    app.get("/users/role/:email", async (req, res) => {
+      const { email } = req.params;
+      if (!email) {
+        return res.status(400).send({ message: "Email is required" });
+      }
+      try {
+        const user = await usersCollection.findOne({ email });
+        if (!user) {
+          return res.status(404).send({ message: "User not found" });
+        }
+        res.send({
+          role: user.role,
+        });
+      } catch (error) {
+        console.error("Error getting user role:", error);
         res.status(500).send({ message: "Server error" });
       }
     });
