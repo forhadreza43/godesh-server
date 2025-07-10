@@ -50,6 +50,9 @@ async function run() {
     const godeshdb = client.db("godeshdb");
     const usersCollection = godeshdb.collection("users");
     const packagesCollection = godeshdb.collection("packages");
+    const storiesCollection = godeshdb.collection("stories");
+    const guideApplicationsCollection =
+      godeshdb.collection("guideApplications");
 
     // Generate jwt token
     app.post("/jwt", async (req, res) => {
@@ -250,6 +253,32 @@ async function run() {
       });
     });
 
+    app.post("/guide-applications", async (req, res) => {
+      const application = req.body;
+
+      try {
+        const existingApplication = await guideApplicationsCollection.findOne({
+          email: application.email,
+        });
+
+        if (existingApplication) {
+          return res.status(400).json({
+            message: "You have already applied as a tour guide.",
+          });
+        }
+        application.status = "pending";
+        application.appliedAt = new Date();
+        const result = await guideApplicationsCollection.insertOne(application);
+        res.json({
+          message: "Application received",
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        console.error("Application error:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
     //get users role
     app.get("/users/role/:email", async (req, res) => {
       const { email } = req.params;
@@ -285,6 +314,15 @@ async function run() {
         res.status(500).json({ message: "Internal server error" });
       }
     });
+
+    //Store package
+    app.post("/stories", async (req, res) => {
+      const story = req.body;
+      story.status = "pending"; 
+      const result = await storiesCollection.insertOne(story);
+      res.json({ message: "Story saved", id: result.insertedId });
+    });
+    
 
     app.get("/", (req, res) => {
       res.send("GoDesh server running");
