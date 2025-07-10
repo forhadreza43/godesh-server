@@ -4,6 +4,7 @@ import express, { json } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { MongoClient, ServerApiVersion } from "mongodb";
+import jwt from "jsonwebtoken";
 const port = process.env.PORT || 3000;
 
 const app = express();
@@ -48,10 +49,12 @@ async function run() {
   try {
     const godeshdb = client.db("godeshdb");
     const usersCollection = godeshdb.collection("users");
+    const packagesCollection = godeshdb.collection("packages");
 
     // Generate jwt token
     app.post("/jwt", async (req, res) => {
       const email = req.body;
+      // console.log(email);
       const token = jwt.sign(email, process.env.ACCESS_TOKEN_SECRET, {
         expiresIn: "7d",
       });
@@ -134,6 +137,119 @@ async function run() {
       }
     });
 
+    // GET User Information /users?email=someone@example.com
+    app.get("/users", async (req, res) => {
+      try {
+        const { email } = req.query;
+        console.log(email);
+        if (email) {
+          const user = await usersCollection.findOne({ email });
+          if (!user) {
+            return res.status(404).json({ message: "User not found" });
+          }
+          res.status(200).json(user);
+        } else {
+          const users = await usersCollection.find().toArray();
+          res.status(200).json(users);
+        }
+      } catch (error) {
+        console.error("Error fetching users:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+    // Update User Information /users?email=user@example.com
+    app.patch("/users", async (req, res) => {
+      try {
+        const { email } = req.query;
+        const { name, photo } = req.body;
+
+        if (!email) {
+          return res
+            .status(400)
+            .json({ message: "Email is required in query" });
+        }
+
+        if (!name && !photo) {
+          return res.status(400).json({ message: "Nothing to update" });
+        }
+
+        const updateFields = {};
+        if (name) updateFields.name = name;
+        if (photo) updateFields.photo = photo;
+
+        const result = await usersCollection.updateOne(
+          { email },
+          { $set: updateFields }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.json({
+          message: "User updated successfully",
+          modifiedCount: result.modifiedCount,
+        });
+      } catch (error) {
+        console.error("Error updating user:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    // Request User role Update /users/request-role?email=user@example.com
+    app.patch("/users/request-role", async (req, res) => {
+      const { email } = req.query;
+      const { requestedRole } = req.body;
+      if (!email || !requestedRole) {
+        return res
+          .status(400)
+          .json({ message: "Email and requestedRole required" });
+      }
+      const result = await usersCollection.updateOne(
+        { email },
+        {
+          $set: {
+            requestedRole,
+            requestStatus: "pending",
+          },
+        }
+      );
+      res.json({
+        message: "Request submitted",
+        modifiedCount: result.modifiedCount,
+      });
+    });
+
+    // Update user role via Admin /users/approve-role?email=user@example.com
+    app.patch("/users/approve-role", async (req, res) => {
+      const { email } = req.query;
+      const { approve } = req.body;
+      const user = await usersCollection.findOne({ email });
+      if (!user || !user.requestedRole || user.requestStatus !== "pending") {
+        return res.status(404).json({ message: "No pending request found" });
+      }
+      const updateFields = approve
+        ? {
+            role: user.requestedRole,
+            requestStatus: "approved",
+            requestedRole: null,
+          }
+        : {
+            requestStatus: "rejected",
+            requestedRole: null,
+          };
+
+      const result = await usersCollection.updateOne(
+        { email },
+        { $set: updateFields }
+      );
+      res.json({
+        message: approve ? "Role approved" : "Role rejected",
+        modifiedCount: result.modifiedCount,
+      });
+    });
+
     //get users role
     app.get("/users/role/:email", async (req, res) => {
       const { email } = req.params;
@@ -151,6 +267,22 @@ async function run() {
       } catch (error) {
         console.error("Error getting user role:", error);
         res.status(500).send({ message: "Server error" });
+      }
+    });
+
+    // Store package data
+    app.post("/packages", async (req, res) => {
+      try {
+        const packageData = req.body;
+        packageData.createdAt = new Date().toISOString();
+        const result = await packagesCollection.insertOne(packageData);
+        res.status(201).json({
+          message: "Package added successfully",
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        console.error("Error adding package:", error);
+        res.status(500).json({ message: "Internal server error" });
       }
     });
 
