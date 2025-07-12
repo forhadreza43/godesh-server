@@ -5,6 +5,8 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
 import jwt from "jsonwebtoken";
+import Stripe from "stripe";
+const stripe = new Stripe(process.env.STRIPE_SK);
 const port = process.env.PORT || 3000;
 
 const app = express();
@@ -50,7 +52,9 @@ async function run() {
     const godeshdb = client.db("godeshdb");
     const usersCollection = godeshdb.collection("users");
     const packagesCollection = godeshdb.collection("packages");
+    const paymentsCollection = godeshdb.collection("payments");
     const storiesCollection = godeshdb.collection("stories");
+    const bookingsCollection = godeshdb.collection("bookings");
     const guideApplicationsCollection =
       godeshdb.collection("guideApplications");
 
@@ -82,6 +86,33 @@ async function run() {
       } catch (err) {
         res.status(500).send(err);
       }
+    });
+
+    // POST /create-booking-payment-intent
+    app.post("/create-booking-payment-intent", async (req, res) => {
+      const { bookingId } = req.body;
+
+      const booking = await bookingsCollection.findOne({
+        _id: new ObjectId(bookingId),
+      });
+      if (!booking)
+        return res.status(404).json({ message: "Booking not found" });
+
+      // 🛡️ Prevent duplicate payment
+      if (["in review", "accepted"].includes(booking.status.toLowerCase())) {
+        return res
+          .status(400)
+          .json({ message: "Booking already paid or in progress" });
+      }
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: booking.price * 100,
+        currency: "usd",
+        automatic_payment_methods: { enabled: true },
+        metadata: { bookingId: bookingId },
+      });
+
+      res.send({ clientSecret: paymentIntent.client_secret });
     });
 
     //Store users information
@@ -410,7 +441,7 @@ async function run() {
           });
         }
         application.status = "pending";
-        application.appliedAt = new Date();
+        application.appliedAt = new Date().toISOString();
         const result = await guideApplicationsCollection.insertOne(application);
         res.json({
           message: "Application received",
@@ -569,6 +600,7 @@ async function run() {
     app.post("/stories", async (req, res) => {
       const story = req.body;
       story.status = "pending";
+      story.createdAt = new Date().toISOString();
       const result = await storiesCollection.insertOne(story);
       res.json({ message: "Story saved", id: result.insertedId });
     });
@@ -671,6 +703,97 @@ async function run() {
         { $pull: { images: imageUrl } }
       );
       res.send(result);
+    });
+
+    // POST /bookings
+    app.post("/bookings", async (req, res) => {
+      try {
+        const booking = req.body;
+        booking.status = "pending";
+        booking.bookingAt = new Date().toISOString();
+
+        const result = await bookingsCollection.insertOne(booking);
+        res.status(201).json({
+          message: "Booking successful",
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        console.error("Error storing booking:", error);
+        res.status(500).json({ message: "Failed to store booking" });
+      }
+    });
+
+    // GET /bookings?email=""
+    app.get("/bookings", async (req, res) => {
+      try {
+        const { email } = req.query;
+
+        if (!email) {
+          return res.status(400).json({ message: "Email is required" });
+        }
+
+        const bookings = await bookingsCollection
+          .find({ touristEmail: email })
+          .sort({ bookingAt: -1 }) // optional: latest first
+          .toArray();
+
+        res.status(200).json(bookings);
+      } catch (error) {
+        console.error("Error fetching bookings:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+    // GET /bookings
+    app.get("/bookings/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!id) {
+          return res.status(400).json({ message: "Id is required" });
+        }
+
+        const booking = await bookingsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        res.status(200).json(booking);
+      } catch (error) {
+        console.error("Error fetching bookings:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+    // PATCH /bookings/:id/paid
+    app.patch("/bookings/:id/paid", async (req, res) => {
+      const { id } = req.params;
+      try {
+        const result = await bookingsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "in review" } }
+        );
+
+        res.send({ updated: result.modifiedCount > 0 });
+      } catch (error) {
+        console.error("Error updating booking status:", error);
+        res.status(500).json({ message: "Failed to update booking status" });
+      }
+    });
+
+    app.post("/payments", async (req, res) => {
+      try {
+        const payment = req.body;
+        payment.paidAt = new Date().toISOString();
+
+        const result = await paymentsCollection.insertOne(payment);
+        res.status(201).json({
+          message: "Payment successful",
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        console.error("Error storing payment:", error);
+        res.status(500).json({ message: "Failed to store payment" });
+      }
     });
 
     app.get("/", (req, res) => {
