@@ -3,7 +3,7 @@ dotenv.config();
 import express, { json } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import { MongoClient, ServerApiVersion } from "mongodb";
+import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
 import jwt from "jsonwebtoken";
 const port = process.env.PORT || 3000;
 
@@ -24,7 +24,7 @@ const uri = process.env.MONGODB_URI;
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
-    strict: true,
+    strict: false,
     deprecationErrors: true,
   },
 });
@@ -87,7 +87,7 @@ async function run() {
     //Store users information
     app.put("/users", async (req, res) => {
       const user = req.body;
-      console.log(user);
+      // console.log(user);
 
       if (!user?.email) {
         return res.status(400).send({ message: "Email is required" });
@@ -144,7 +144,7 @@ async function run() {
     app.get("/users", async (req, res) => {
       try {
         const { email } = req.query;
-        console.log(email);
+        // console.log(email);
         if (email) {
           const user = await usersCollection.findOne({ email });
           if (!user) {
@@ -161,11 +161,153 @@ async function run() {
       }
     });
 
+    //Manage users api
+    app.get("/users/admin", async (req, res) => {
+      const {
+        search = "",
+        searchField = "name",
+        role = "",
+        requestStatus = "",
+        page = 1,
+        limit = 10,
+      } = req.query;
+
+      const query = {
+        [searchField]: { $regex: search, $options: "i" },
+      };
+
+      if (role) {
+        query.role = role;
+      }
+      if (requestStatus) query.requestStatus = requestStatus;
+
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+
+      const [users, total] = await Promise.all([
+        usersCollection.find(query).skip(skip).limit(parseInt(limit)).toArray(),
+        usersCollection.countDocuments(query),
+      ]);
+
+      res.json({ users, total });
+    });
+
+    // GET /users/role/guide
+    app.get("/users/role/guide", async (req, res) => {
+      try {
+        const guides = await usersCollection.find({ role: "guide" }).toArray();
+        res.json(guides);
+      } catch (error) {
+        console.error("Error fetching guides:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    // GET /users/:id
+    app.get("/users/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid user ID" });
+        }
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+        res.json(user);
+      } catch (error) {
+        console.error("Error fetching user:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    // Get stats
+    app.get("/admin/stats", async (req, res) => {
+      // const totalPayment = await paymentsCollection
+      //   .aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }])
+      //   .toArray();
+
+      const totalGuides = await usersCollection.countDocuments({
+        role: "guide",
+      });
+      const totalTourist = await usersCollection.countDocuments({
+        role: "tourist",
+      });
+      const totalPackages = await packagesCollection.estimatedDocumentCount();
+      const totalStories = await storiesCollection.estimatedDocumentCount();
+
+      res.send({
+        // totalPayment: totalPayment[0]?.total || 0,
+        totalGuides,
+        totalTourist,
+        totalPackages,
+        totalStories,
+      });
+    });
+
+    //Accept request
+    app.patch("/users/approve/:id", async (req, res) => {
+      const id = req.params.id;
+
+      try {
+        // Update user role and clear request
+        const userUpdate = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: { role: "guide" },
+            $unset: { requestStatus: "", requestedRole: "" },
+          }
+        );
+
+        // Update application status (based on user email)
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+        const appUpdate = await guideApplicationsCollection.updateOne(
+          { email: user.email, status: "pending" },
+          { $set: { status: "approved" } }
+        );
+
+        res.send({
+          message: "User approved and application updated",
+          userUpdate,
+          appUpdate,
+        });
+      } catch (error) {
+        res.status(500).send({ error: "Approval failed", details: error });
+      }
+    });
+
+    //Reject Application
+    app.patch("/users/reject/:id", async (req, res) => {
+      const id = req.params.id;
+
+      try {
+        // Remove request-related fields from user
+        const userUpdate = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $unset: { requestStatus: "", requestedRole: "" },
+          }
+        );
+
+        // Update application to rejected (or delete it)
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+        const appUpdate = await guideApplicationsCollection.updateOne(
+          { email: user.email, status: "pending" },
+          { $set: { status: "rejected" } }
+        );
+
+        res.send({ message: "Application rejected", userUpdate, appUpdate });
+      } catch (error) {
+        res.status(500).send({ error: "Rejection failed", details: error });
+      }
+    });
+
     // Update User Information /users?email=user@example.com
     app.patch("/users", async (req, res) => {
       try {
         const { email } = req.query;
-        const { name, photo } = req.body;
+        const { name, image } = req.body;
 
         if (!email) {
           return res
@@ -173,13 +315,13 @@ async function run() {
             .json({ message: "Email is required in query" });
         }
 
-        if (!name && !photo) {
+        if (!name && !image) {
           return res.status(400).json({ message: "Nothing to update" });
         }
 
         const updateFields = {};
         if (name) updateFields.name = name;
-        if (photo) updateFields.photo = photo;
+        if (image) updateFields.image = image;
 
         const result = await usersCollection.updateOne(
           { email },
@@ -255,6 +397,7 @@ async function run() {
 
     app.post("/guide-applications", async (req, res) => {
       const application = req.body;
+      // console.log(application);
 
       try {
         const existingApplication = await guideApplicationsCollection.findOne({
@@ -276,6 +419,25 @@ async function run() {
       } catch (error) {
         console.error("Application error:", error);
         res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    //get Application
+    app.get("/guide-applications", async (req, res) => {
+      try {
+        const { email } = req.query;
+        if (email) {
+          const application = await guideApplicationsCollection.findOne({
+            email,
+          });
+          if (!application) {
+            return res.status(404).json({ message: "Application not found" });
+          }
+          res.status(200).json(application);
+        }
+      } catch (error) {
+        console.error("Error fetching application:", error);
+        res.status(500).json({ message: "Internal Server Error" });
       }
     });
 
@@ -315,14 +477,201 @@ async function run() {
       }
     });
 
-    //Store package
+    //get 3 random packages
+    app.get("/random-packages", async (req, res) => {
+      try {
+        const result = await packagesCollection
+          .aggregate([{ $sample: { size: 3 } }])
+          .toArray();
+        res.send(result);
+      } catch (err) {
+        res.status(500).json({ error: "Failed to fetch random packages" });
+      }
+    });
+
+    // GET /packages
+    app.get("/packages", async (req, res) => {
+      try {
+        const {
+          search = "",
+          sort = "default",
+          category = "",
+          page = 1,
+          limit = 10,
+        } = req.query;
+        const query = {};
+
+        if (search) {
+          query.tripTitle = { $regex: search, $options: "i" };
+        }
+
+        if (category) {
+          query.tourType = category;
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        let cursor = packagesCollection.find(query);
+
+        // Sorting
+        if (sort === "priceLow") {
+          cursor = cursor.sort({ price: 1 });
+        } else if (sort === "priceHigh") {
+          cursor = cursor.sort({ price: -1 });
+        } else if (sort === "recent") {
+          cursor = cursor.sort({ createdAt: -1 });
+        }
+
+        const total = await cursor.clone().count();
+        const packages = await cursor
+          .skip(skip)
+          .limit(parseInt(limit))
+          .toArray();
+        const totalPages = Math.ceil(total / limit);
+
+        res.json({ data: packages, totalPages });
+      } catch (err) {
+        console.error("Error fetching packages:", err);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    // GET /packages/categories
+    app.get("/packages/categories", async (req, res) => {
+      try {
+        const categories = await packagesCollection.distinct("tourType");
+        console.log("Categories:", categories);
+        res.json(categories);
+      } catch (err) {
+        console.error("Error fetching categories:", err.message);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    // GET /packages/:id
+    app.get("/packages/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const packageData = await packagesCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!packageData) {
+          return res.status(404).json({ message: "Package not found" });
+        }
+        res.json(packageData);
+      } catch (error) {
+        console.error("Error fetching package:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    //Store Stories
     app.post("/stories", async (req, res) => {
       const story = req.body;
-      story.status = "pending"; 
+      story.status = "pending";
       const result = await storiesCollection.insertOne(story);
       res.json({ message: "Story saved", id: result.insertedId });
     });
-    
+
+    // GET /stories
+    app.get("/stories", async (req, res) => {
+      try {
+        const { email, status } = req.query;
+        const query = {};
+        if (email) {
+          query.createdBy = email;
+        }
+        if (status) {
+          query.status = status;
+        }
+        const stories = await storiesCollection.find(query).toArray();
+        if (!stories || stories.length === 0) {
+          return res.status(404).json({ message: "No stories found" });
+        }
+        res.status(200).json(stories);
+      } catch (error) {
+        console.error("Error fetching stories:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+    //get Stories by id
+    app.get("/stories/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (id) {
+          const story = await storiesCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          res.status(200).json(story);
+        }
+      } catch (error) {
+        console.error("Error fetching story:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+    //delete stories
+    app.delete("/stories/:id", async (req, res) => {
+      const { id } = req.params;
+      // console.log(id);
+      const result = await storiesCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
+      res.send(result);
+    });
+
+    //Update Stories by user
+    app.patch("/stories/:id", async (req, res) => {
+      const { id } = req.params;
+      const updatedData = req.body;
+
+      const result = await storiesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            title: updatedData.title,
+            content: updatedData.content,
+          },
+        }
+      );
+      res.send(result);
+    });
+
+    //Approved or rejected by admin
+    app.patch("/stories/:id/approve", async (req, res) => {
+      const { status } = req.body; // "approved" or "rejected"
+      const { id } = req.params;
+      const result = await storiesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status } }
+      );
+      res.send(result);
+    });
+
+    //Add New image
+    app.patch("/stories/add-image/:id", async (req, res) => {
+      const { id } = req.params;
+      const { imageUrl } = req.body;
+
+      const result = await storiesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $push: { images: imageUrl } }
+      );
+      res.send(result);
+    });
+
+    //remove Specific image
+    app.patch("/stories/remove-image/:id", async (req, res) => {
+      const { id } = req.params;
+      const { imageUrl } = req.body;
+
+      const result = await storiesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $pull: { images: imageUrl } }
+      );
+      res.send(result);
+    });
 
     app.get("/", (req, res) => {
       res.send("GoDesh server running");
