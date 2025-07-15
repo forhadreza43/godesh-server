@@ -225,6 +225,19 @@ async function run() {
     // GET /users/role/guide
     app.get("/users/role/guide", async (req, res) => {
       try {
+        const { limit } = req.query;
+
+        if (limit) {
+          const guides = await usersCollection
+            .aggregate([
+              { $match: { role: "guide" } },
+              { $sample: { size: parseInt(limit) } },
+            ])
+            .toArray();
+          return res.json(guides);
+        }
+
+        // Return all guides if no amount specified
         const guides = await usersCollection.find({ role: "guide" }).toArray();
         res.json(guides);
       } catch (error) {
@@ -764,19 +777,99 @@ async function run() {
       }
     });
 
-    // PATCH /bookings/:id/paid
-    app.patch("/bookings/:id/paid", async (req, res) => {
+    // PATCH /bookings/:id/status
+    app.patch("/bookings/:id/status", async (req, res) => {
       const { id } = req.params;
+      const { status } = req.body;
+
+      if (!status) {
+        return res
+          .status(400)
+          .json({ message: "Status is required in request body" });
+      }
+
       try {
         const result = await bookingsCollection.updateOne(
           { _id: new ObjectId(id) },
-          { $set: { status: "in review" } }
+          {
+            $set: {
+              status: status.toLowerCase(),
+              ...(status.toLowerCase() === "rejected" && {
+                rejectedAt: new Date(),
+              }),
+              ...(status.toLowerCase() === "accepted" && {
+                acceptedAt: new Date(),
+              }),
+            },
+          }
         );
 
         res.send({ updated: result.modifiedCount > 0 });
       } catch (error) {
         console.error("Error updating booking status:", error);
         res.status(500).json({ message: "Failed to update booking status" });
+      }
+    });
+
+    // DELETE /bookings/:id
+    app.delete("/bookings/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid booking ID" });
+        }
+
+        const result = await bookingsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 0) {
+          return res
+            .status(404)
+            .json({ message: "Booking not found or already deleted" });
+        }
+
+        res.status(200).json({ message: "Booking deleted successfully" });
+      } catch (error) {
+        console.error("Error deleting booking:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    // GET /bookings/guide/:guideId
+    app.get("/bookings/guide/:guideId", async (req, res) => {
+      try {
+        const { guideId } = req.params;
+        const { status, page = 1, limit = 5 } = req.query;
+
+        const query = { guideId };
+
+        if (status) {
+          query.status = status.toLowerCase();
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const [data, total] = await Promise.all([
+          bookingsCollection
+            .find(query)
+            .sort({ bookingAt: -1 }) // Optional: sort by booking time
+            .skip(skip)
+            .limit(parseInt(limit))
+            .toArray(),
+
+          bookingsCollection.countDocuments(query),
+        ]);
+
+        res.status(200).json({
+          data,
+          total,
+          totalPages: Math.ceil(total / limit),
+        });
+      } catch (error) {
+        console.error("Error fetching guide bookings:", error);
+        res.status(500).json({ message: "Internal server error" });
       }
     });
 
