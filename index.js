@@ -47,6 +47,31 @@ const verifyToken = async (req, res, next) => {
   });
 };
 
+export const verifyAdmin = (req, res, next) => {
+  const user = req.user;
+  console.log(user);
+  if (user?.role !== "admin") {
+    return res.status(403).json({ message: "Forbidden: Admins only" });
+  }
+  next();
+};
+
+export const verifyGuide = (req, res, next) => {
+  const user = req.user;
+  if (user?.role !== "guide") {
+    return res.status(403).json({ message: "Forbidden: Guides only" });
+  }
+  next();
+};
+
+export const verifyTourist = (req, res, next) => {
+  const user = req.user;
+  if (user?.role !== "tourist") {
+    return res.status(403).json({ message: "Forbidden: Tourists only" });
+  }
+  next();
+};
+
 async function run() {
   try {
     const godeshdb = client.db("godeshdb");
@@ -60,11 +85,20 @@ async function run() {
 
     // Generate jwt token
     app.post("/jwt", async (req, res) => {
-      const email = req.body;
-      // console.log(email);
-      const token = jwt.sign(email, process.env.ACCESS_TOKEN_SECRET, {
-        expiresIn: "7d",
-      });
+      const { email } = req.body;
+
+      const user = await usersCollection.findOne({ email });
+
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      const token = jwt.sign(
+        { email: user.email, role: user.role },
+        process.env.ACCESS_TOKEN_SECRET,
+        { expiresIn: "7d" }
+      );
+
       res
         .cookie("token", token, {
           httpOnly: true,
@@ -73,6 +107,7 @@ async function run() {
         })
         .send({ success: true });
     });
+
     // Logout
     app.get("/logout", async (_req, res) => {
       try {
@@ -193,7 +228,7 @@ async function run() {
     });
 
     //Manage users api
-    app.get("/users/admin", async (req, res) => {
+    app.get("/users/admin", verifyToken, verifyAdmin, async (req, res) => {
       const {
         search = "",
         searchField = "name",
@@ -265,90 +300,116 @@ async function run() {
     });
 
     // Get stats
-    app.get("/admin/stats", async (req, res) => {
-      // const totalPayment = await paymentsCollection
-      //   .aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }])
-      //   .toArray();
+    app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const [totalPaymentResult, totalBookingPriceResult] = await Promise.all(
+          [
+            paymentsCollection
+              .aggregate([
+                { $group: { _id: null, total: { $sum: "$amount" } } },
+              ])
+              .toArray(),
 
-      const totalGuides = await usersCollection.countDocuments({
-        role: "guide",
-      });
-      const totalTourist = await usersCollection.countDocuments({
-        role: "tourist",
-      });
-      const totalPackages = await packagesCollection.estimatedDocumentCount();
-      const totalStories = await storiesCollection.estimatedDocumentCount();
+            bookingsCollection
+              .aggregate([{ $group: { _id: null, total: { $sum: "$price" } } }])
+              .toArray(),
+          ]
+        );
 
-      res.send({
-        // totalPayment: totalPayment[0]?.total || 0,
-        totalGuides,
-        totalTourist,
-        totalPackages,
-        totalStories,
-      });
+        const totalGuides = await usersCollection.countDocuments({
+          role: "guide",
+        });
+        const totalTourist = await usersCollection.countDocuments({
+          role: "tourist",
+        });
+        const totalPackages = await packagesCollection.estimatedDocumentCount();
+        const totalStories = await storiesCollection.estimatedDocumentCount();
+
+        res.send({
+          totalPayment: totalPaymentResult[0]?.total || 0,
+          totalBookingPrice: totalBookingPriceResult[0]?.total || 0,
+          totalGuides,
+          totalTourist,
+          totalPackages,
+          totalStories,
+        });
+      } catch (error) {
+        console.error("Error fetching admin stats:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
     });
 
     //Accept request
-    app.patch("/users/approve/:id", async (req, res) => {
-      const id = req.params.id;
+    app.patch(
+      "/users/approve/:id",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
 
-      try {
-        // Update user role and clear request
-        const userUpdate = await usersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: { role: "guide" },
-            $unset: { requestStatus: "", requestedRole: "" },
-          }
-        );
+        try {
+          // Update user role and clear request
+          const userUpdate = await usersCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $set: { role: "guide" },
+              $unset: { requestStatus: "", requestedRole: "" },
+            }
+          );
 
-        // Update application status (based on user email)
-        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+          // Update application status (based on user email)
+          const user = await usersCollection.findOne({ _id: new ObjectId(id) });
 
-        const appUpdate = await guideApplicationsCollection.updateOne(
-          { email: user.email, status: "pending" },
-          { $set: { status: "approved" } }
-        );
+          const appUpdate = await guideApplicationsCollection.updateOne(
+            { email: user.email, status: "pending" },
+            { $set: { status: "approved" } }
+          );
 
-        res.send({
-          message: "User approved and application updated",
-          userUpdate,
-          appUpdate,
-        });
-      } catch (error) {
-        res.status(500).send({ error: "Approval failed", details: error });
+          res.send({
+            message: "User approved and application updated",
+            userUpdate,
+            appUpdate,
+          });
+        } catch (error) {
+          res.status(500).send({ error: "Approval failed", details: error });
+        }
       }
-    });
+    );
 
     //Reject Application
-    app.patch("/users/reject/:id", async (req, res) => {
-      const id = req.params.id;
+    app.patch(
+      "/users/reject/:id",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
 
-      try {
-        // Remove request-related fields from user
-        const userUpdate = await usersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $unset: { requestStatus: "", requestedRole: "" },
-          }
-        );
+        try {
+          // Remove request-related fields from user
+          const userUpdate = await usersCollection.updateOne(
+            { _id: new ObjectId(id) },
+            {
+              $unset: { requestStatus: "", requestedRole: "" },
+            }
+          );
 
-        // Update application to rejected (or delete it)
-        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+          // Update application to rejected (or delete it)
+          const user = await usersCollection.findOne({ _id: new ObjectId(id) });
 
-        const appUpdate = await guideApplicationsCollection.updateOne(
-          { email: user.email, status: "pending" },
-          { $set: { status: "rejected" } }
-        );
+          const appUpdate = await guideApplicationsCollection.updateOne(
+            { email: user.email, status: "pending" },
+            { $set: { status: "rejected" } }
+          );
 
-        res.send({ message: "Application rejected", userUpdate, appUpdate });
-      } catch (error) {
-        res.status(500).send({ error: "Rejection failed", details: error });
+          res.send({ message: "Application rejected", userUpdate, appUpdate });
+        } catch (error) {
+          res.status(500).send({ error: "Rejection failed", details: error });
+        }
       }
-    });
+    );
 
     // Update User Information /users?email=user@example.com
-    app.patch("/users", async (req, res) => {
+    app.patch("/users", verifyToken, async (req, res) => {
       try {
         const { email } = req.query;
         const { name, image } = req.body;
@@ -387,57 +448,67 @@ async function run() {
     });
 
     // Request User role Update /users/request-role?email=user@example.com
-    app.patch("/users/request-role", async (req, res) => {
-      const { email } = req.query;
-      const { requestedRole } = req.body;
-      if (!email || !requestedRole) {
-        return res
-          .status(400)
-          .json({ message: "Email and requestedRole required" });
-      }
-      const result = await usersCollection.updateOne(
-        { email },
-        {
-          $set: {
-            requestedRole,
-            requestStatus: "pending",
-          },
+    app.patch(
+      "/users/request-role",
+      verifyToken,
+      verifyTourist,
+      async (req, res) => {
+        const { email } = req.query;
+        const { requestedRole } = req.body;
+        if (!email || !requestedRole) {
+          return res
+            .status(400)
+            .json({ message: "Email and requestedRole required" });
         }
-      );
-      res.json({
-        message: "Request submitted",
-        modifiedCount: result.modifiedCount,
-      });
-    });
+        const result = await usersCollection.updateOne(
+          { email },
+          {
+            $set: {
+              requestedRole,
+              requestStatus: "pending",
+            },
+          }
+        );
+        res.json({
+          message: "Request submitted",
+          modifiedCount: result.modifiedCount,
+        });
+      }
+    );
 
     // Update user role via Admin /users/approve-role?email=user@example.com
-    app.patch("/users/approve-role", async (req, res) => {
-      const { email } = req.query;
-      const { approve } = req.body;
-      const user = await usersCollection.findOne({ email });
-      if (!user || !user.requestedRole || user.requestStatus !== "pending") {
-        return res.status(404).json({ message: "No pending request found" });
-      }
-      const updateFields = approve
-        ? {
-            role: user.requestedRole,
-            requestStatus: "approved",
-            requestedRole: null,
-          }
-        : {
-            requestStatus: "rejected",
-            requestedRole: null,
-          };
+    app.patch(
+      "/users/approve-role",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const { email } = req.query;
+        const { approve } = req.body;
+        const user = await usersCollection.findOne({ email });
+        if (!user || !user.requestedRole || user.requestStatus !== "pending") {
+          return res.status(404).json({ message: "No pending request found" });
+        }
+        const updateFields = approve
+          ? {
+              role: user.requestedRole,
+              requestStatus: "approved",
+              requestedRole: null,
+            }
+          : {
+              requestStatus: "rejected",
+              requestedRole: null,
+            };
 
-      const result = await usersCollection.updateOne(
-        { email },
-        { $set: updateFields }
-      );
-      res.json({
-        message: approve ? "Role approved" : "Role rejected",
-        modifiedCount: result.modifiedCount,
-      });
-    });
+        const result = await usersCollection.updateOne(
+          { email },
+          { $set: updateFields }
+        );
+        res.json({
+          message: approve ? "Role approved" : "Role rejected",
+          modifiedCount: result.modifiedCount,
+        });
+      }
+    );
 
     app.post("/guide-applications", async (req, res) => {
       const application = req.body;
@@ -506,7 +577,7 @@ async function run() {
     });
 
     // Store package data
-    app.post("/packages", async (req, res) => {
+    app.post("/packages", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const packageData = req.body;
         packageData.createdAt = new Date().toISOString();
@@ -621,19 +692,61 @@ async function run() {
     // GET /stories
     app.get("/stories", async (req, res) => {
       try {
-        const { email, status } = req.query;
+        const { email, status, random } = req.query;
         const query = {};
+
         if (email) {
           query.createdBy = email;
         }
+
         if (status) {
           query.status = status;
         }
+
+        // If 'random' is specified, return N random stories
+        if (random) {
+          const randomStories = await storiesCollection
+            .aggregate([
+              { $match: query },
+              { $sample: { size: parseInt(random) } },
+            ])
+            .toArray();
+
+          return res.status(200).json(randomStories);
+        }
+
+        // Default: return all matching stories
         const stories = await storiesCollection.find(query).toArray();
+
         if (!stories || stories.length === 0) {
           return res.status(404).json({ message: "No stories found" });
         }
+
         res.status(200).json(stories);
+      } catch (error) {
+        console.error("Error fetching stories:", error);
+        res.status(500).json({ message: "Internal Server Error" });
+      }
+    });
+
+    // GET /stories
+    app.get("/all-stories", async (req, res) => {
+      try {
+        const { status, page = 1, limit = 10 } = req.query;
+        const query = {};
+        if (status) query.status = status;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const total = await storiesCollection.countDocuments(query);
+        const stories = await storiesCollection
+          .find(query)
+          .skip(skip)
+          .limit(parseInt(limit))
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.status(200).json({
+          data: stories,
+          totalPages: Math.ceil(total / limit),
+        });
       } catch (error) {
         console.error("Error fetching stories:", error);
         res.status(500).json({ message: "Internal Server Error" });
