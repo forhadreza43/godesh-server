@@ -1005,11 +1005,11 @@ async function run() {
     app.get("/", (req, res) => {
       res.send("GoDesh server running");
     });
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // // Send a ping to confirm a successful connection
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
     app.listen(port, () => {
       console.log(`Server listening on port ${port}`);
