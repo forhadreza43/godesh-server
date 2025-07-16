@@ -1,21 +1,22 @@
-import dotenv from "dotenv";
-dotenv.config();
-import express, { json } from "express";
-import cors from "cors";
-import cookieParser from "cookie-parser";
-import { MongoClient, ObjectId, ServerApiVersion } from "mongodb";
-import jwt from "jsonwebtoken";
-import Stripe from "stripe";
-const stripe = new Stripe(process.env.STRIPE_SK);
+require("dotenv").config();
+const express = require("express");
+const stripe = require("stripe")(process.env.STRIPE_SK);
+const cors = require("cors");
+const cookieParser = require("cookie-parser");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const jwt = require("jsonwebtoken");
 const port = process.env.PORT || 3000;
 
 const app = express();
 
-app.use(json());
+app.use(express.json());
 app.use(cookieParser());
+
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: (origin, callback) => {
+      callback(null, origin);
+    },
     credentials: true,
   })
 );
@@ -31,45 +32,31 @@ const client = new MongoClient(uri, {
   },
 });
 
-const verifyToken = async (req, res, next) => {
-  const token = req.cookies?.token;
-
-  if (!token) {
-    return res.status(401).send({ message: "unauthorized access" });
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "Unauthorized access" });
   }
+
+  const token = authHeader.split(" ")[1];
+
   jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
     if (err) {
-      console.log(err);
-      return res.status(401).send({ message: "unauthorized access" });
+      return res.status(401).send({ message: "Unauthorized access" });
     }
     req.user = decoded;
     next();
   });
 };
 
-export const verifyAdmin = (req, res, next) => {
-  const user = req.user;
-  console.log(user);
-  if (user?.role !== "admin") {
-    return res.status(403).json({ message: "Forbidden: Admins only" });
-  }
-  next();
-};
-
-export const verifyGuide = (req, res, next) => {
-  const user = req.user;
-  if (user?.role !== "guide") {
-    return res.status(403).json({ message: "Forbidden: Guides only" });
-  }
-  next();
-};
-
-export const verifyTourist = (req, res, next) => {
-  const user = req.user;
-  if (user?.role !== "tourist") {
-    return res.status(403).json({ message: "Forbidden: Tourists only" });
-  }
-  next();
+const verifyRoles = (...allowedRoles) => {
+  return (req, res, next) => {
+    const user = req.user;
+    if (!allowedRoles.includes(user?.role)) {
+      return res.status(403).json({ message: "Forbidden: Access denied" });
+    }
+    next();
+  };
 };
 
 async function run() {
@@ -94,33 +81,12 @@ async function run() {
       }
 
       const token = jwt.sign(
-        { email: user.email, role: user.role },
+        { email, role: user.role },
         process.env.ACCESS_TOKEN_SECRET,
         { expiresIn: "7d" }
       );
 
-      res
-        .cookie("token", token, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === "production",
-          sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
-        })
-        .send({ success: true });
-    });
-
-    // Logout
-    app.get("/logout", async (_req, res) => {
-      try {
-        res
-          .clearCookie("token", {
-            maxAge: 0,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: process.env.NODE_ENV === "production" ? "none" : "strict",
-          })
-          .send({ success: true });
-      } catch (err) {
-        res.status(500).send(err);
-      }
+      res.send({ token }); 
     });
 
     // POST /create-booking-payment-intent
@@ -133,7 +99,7 @@ async function run() {
       if (!booking)
         return res.status(404).json({ message: "Booking not found" });
 
-      // 🛡️ Prevent duplicate payment
+      //  Prevent duplicate payment
       if (["in review", "accepted"].includes(booking.status.toLowerCase())) {
         return res
           .status(400)
@@ -228,7 +194,7 @@ async function run() {
     });
 
     //Manage users api
-    app.get("/users/admin", verifyToken, verifyAdmin, async (req, res) => {
+    app.get("/users/admin", async (req, res) => {
       const {
         search = "",
         searchField = "name",
@@ -300,116 +266,113 @@ async function run() {
     });
 
     // Get stats
-    app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
-      try {
-        const [totalPaymentResult, totalBookingPriceResult] = await Promise.all(
-          [
-            paymentsCollection
-              .aggregate([
-                { $group: { _id: null, total: { $sum: "$amount" } } },
-              ])
-              .toArray(),
+    app.get(
+      "/admin/stats",
+      verifyToken,
+      verifyRoles("admin"),
+      async (req, res) => {
+        try {
+          const [totalPaymentResult, totalBookingPriceResult] =
+            await Promise.all([
+              paymentsCollection
+                .aggregate([
+                  { $group: { _id: null, total: { $sum: "$amount" } } },
+                ])
+                .toArray(),
 
-            bookingsCollection
-              .aggregate([{ $group: { _id: null, total: { $sum: "$price" } } }])
-              .toArray(),
-          ]
+              bookingsCollection
+                .aggregate([
+                  { $group: { _id: null, total: { $sum: "$price" } } },
+                ])
+                .toArray(),
+            ]);
+
+          const totalGuides = await usersCollection.countDocuments({
+            role: "guide",
+          });
+          const totalTourist = await usersCollection.countDocuments({
+            role: "tourist",
+          });
+          const totalPackages =
+            await packagesCollection.estimatedDocumentCount();
+          const totalStories = await storiesCollection.estimatedDocumentCount();
+
+          res.send({
+            totalPayment: totalPaymentResult[0]?.total || 0,
+            totalBookingPrice: totalBookingPriceResult[0]?.total || 0,
+            totalGuides,
+            totalTourist,
+            totalPackages,
+            totalStories,
+          });
+        } catch (error) {
+          console.error("Error fetching admin stats:", error);
+          res.status(500).json({ message: "Internal server error" });
+        }
+      }
+    );
+
+    //Accept request
+    app.patch("/users/approve/:id", async (req, res) => {
+      const id = req.params.id;
+
+      try {
+        // Update user role and clear request
+        const userUpdate = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: { role: "guide" },
+            $unset: { requestStatus: "", requestedRole: "" },
+          }
         );
 
-        const totalGuides = await usersCollection.countDocuments({
-          role: "guide",
-        });
-        const totalTourist = await usersCollection.countDocuments({
-          role: "tourist",
-        });
-        const totalPackages = await packagesCollection.estimatedDocumentCount();
-        const totalStories = await storiesCollection.estimatedDocumentCount();
+        // Update application status (based on user email)
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+        const appUpdate = await guideApplicationsCollection.updateOne(
+          { email: user.email, status: "pending" },
+          { $set: { status: "approved" } }
+        );
 
         res.send({
-          totalPayment: totalPaymentResult[0]?.total || 0,
-          totalBookingPrice: totalBookingPriceResult[0]?.total || 0,
-          totalGuides,
-          totalTourist,
-          totalPackages,
-          totalStories,
+          message: "User approved and application updated",
+          userUpdate,
+          appUpdate,
         });
       } catch (error) {
-        console.error("Error fetching admin stats:", error);
-        res.status(500).json({ message: "Internal server error" });
+        res.status(500).send({ error: "Approval failed", details: error });
       }
     });
 
-    //Accept request
-    app.patch(
-      "/users/approve/:id",
-      verifyToken,
-      verifyAdmin,
-      async (req, res) => {
-        const id = req.params.id;
-
-        try {
-          // Update user role and clear request
-          const userUpdate = await usersCollection.updateOne(
-            { _id: new ObjectId(id) },
-            {
-              $set: { role: "guide" },
-              $unset: { requestStatus: "", requestedRole: "" },
-            }
-          );
-
-          // Update application status (based on user email)
-          const user = await usersCollection.findOne({ _id: new ObjectId(id) });
-
-          const appUpdate = await guideApplicationsCollection.updateOne(
-            { email: user.email, status: "pending" },
-            { $set: { status: "approved" } }
-          );
-
-          res.send({
-            message: "User approved and application updated",
-            userUpdate,
-            appUpdate,
-          });
-        } catch (error) {
-          res.status(500).send({ error: "Approval failed", details: error });
-        }
-      }
-    );
-
     //Reject Application
-    app.patch(
-      "/users/reject/:id",
-      verifyToken,
-      verifyAdmin,
-      async (req, res) => {
-        const id = req.params.id;
+    app.patch("/users/reject/:id", async (req, res) => {
+      const id = req.params.id;
 
-        try {
-          // Remove request-related fields from user
-          const userUpdate = await usersCollection.updateOne(
-            { _id: new ObjectId(id) },
-            {
-              $unset: { requestStatus: "", requestedRole: "" },
-            }
-          );
+      try {
+        // Remove request-related fields from user
+        const userUpdate = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $unset: { requestStatus: "", requestedRole: "" },
+          }
+        );
 
-          // Update application to rejected (or delete it)
-          const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+        // Update application to rejected (or delete it)
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
 
-          const appUpdate = await guideApplicationsCollection.updateOne(
-            { email: user.email, status: "pending" },
-            { $set: { status: "rejected" } }
-          );
+        const appUpdate = await guideApplicationsCollection.updateOne(
+          { email: user.email, status: "pending" },
+          { $set: { status: "rejected" } }
+        );
 
-          res.send({ message: "Application rejected", userUpdate, appUpdate });
-        } catch (error) {
-          res.status(500).send({ error: "Rejection failed", details: error });
-        }
+        res.send({ message: "Application rejected", userUpdate, appUpdate });
+      } catch (error) {
+        res.status(500).send({ error: "Rejection failed", details: error });
       }
-    );
+    });
 
     // Update User Information /users?email=user@example.com
-    app.patch("/users", verifyToken, async (req, res) => {
+    app.patch("/users", async (req, res) => {
       try {
         const { email } = req.query;
         const { name, image } = req.body;
@@ -448,67 +411,57 @@ async function run() {
     });
 
     // Request User role Update /users/request-role?email=user@example.com
-    app.patch(
-      "/users/request-role",
-      verifyToken,
-      verifyTourist,
-      async (req, res) => {
-        const { email } = req.query;
-        const { requestedRole } = req.body;
-        if (!email || !requestedRole) {
-          return res
-            .status(400)
-            .json({ message: "Email and requestedRole required" });
-        }
-        const result = await usersCollection.updateOne(
-          { email },
-          {
-            $set: {
-              requestedRole,
-              requestStatus: "pending",
-            },
-          }
-        );
-        res.json({
-          message: "Request submitted",
-          modifiedCount: result.modifiedCount,
-        });
+    app.patch("/users/request-role", async (req, res) => {
+      const { email } = req.query;
+      const { requestedRole } = req.body;
+      if (!email || !requestedRole) {
+        return res
+          .status(400)
+          .json({ message: "Email and requestedRole required" });
       }
-    );
+      const result = await usersCollection.updateOne(
+        { email },
+        {
+          $set: {
+            requestedRole,
+            requestStatus: "pending",
+          },
+        }
+      );
+      res.json({
+        message: "Request submitted",
+        modifiedCount: result.modifiedCount,
+      });
+    });
 
     // Update user role via Admin /users/approve-role?email=user@example.com
-    app.patch(
-      "/users/approve-role",
-      verifyToken,
-      verifyAdmin,
-      async (req, res) => {
-        const { email } = req.query;
-        const { approve } = req.body;
-        const user = await usersCollection.findOne({ email });
-        if (!user || !user.requestedRole || user.requestStatus !== "pending") {
-          return res.status(404).json({ message: "No pending request found" });
-        }
-        const updateFields = approve
-          ? {
-              role: user.requestedRole,
-              requestStatus: "approved",
-              requestedRole: null,
-            }
-          : {
-              requestStatus: "rejected",
-              requestedRole: null,
-            };
-
-        const result = await usersCollection.updateOne(
-          { email },
-          { $set: updateFields }
-        );
-        res.json({
-          message: approve ? "Role approved" : "Role rejected",
-          modifiedCount: result.modifiedCount,
-        });
+    app.patch("/users/approve-role", async (req, res) => {
+      const { email } = req.query;
+      const { approve } = req.body;
+      const user = await usersCollection.findOne({ email });
+      if (!user || !user.requestedRole || user.requestStatus !== "pending") {
+        return res.status(404).json({ message: "No pending request found" });
       }
-    );
+      const updateFields = approve
+        ? {
+            role: user.requestedRole,
+            requestStatus: "approved",
+            requestedRole: null,
+          }
+        : {
+            requestStatus: "rejected",
+            requestedRole: null,
+          };
+
+      const result = await usersCollection.updateOne(
+        { email },
+        { $set: updateFields }
+      );
+      res.json({
+        message: approve ? "Role approved" : "Role rejected",
+        modifiedCount: result.modifiedCount,
+      });
+    });
 
     app.post("/guide-applications", async (req, res) => {
       const application = req.body;
@@ -577,7 +530,7 @@ async function run() {
     });
 
     // Store package data
-    app.post("/packages", verifyToken, verifyAdmin, async (req, res) => {
+    app.post("/packages", async (req, res) => {
       try {
         const packageData = req.body;
         packageData.createdAt = new Date().toISOString();
@@ -1005,7 +958,7 @@ async function run() {
     app.get("/", (req, res) => {
       res.send("GoDesh server running");
     });
-    // // Send a ping to confirm a successful connection
+    // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
     // console.log(
     //   "Pinged your deployment. You successfully connected to MongoDB!"
