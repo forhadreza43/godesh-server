@@ -21,6 +21,15 @@ app.use(
   })
 );
 
+// app.use(
+//   cors({
+//     origin: "http://localhost:5173",
+//     methods: ["GET", "POST", "PATCH", "DELETE"],
+//     credentials: true,
+//   })
+// );
+
+
 const uri = process.env.MONGODB_URI;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -549,7 +558,7 @@ async function run() {
     app.get("/random-packages", async (req, res) => {
       try {
         const result = await packagesCollection
-          .aggregate([{ $sample: { size: 3 } }])
+          .aggregate([{ $sample: { size: 4 } }])
           .toArray();
         res.send(result);
       } catch (err) {
