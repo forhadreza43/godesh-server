@@ -249,13 +249,11 @@ The project includes `vercel.json` for Vercel deployment configuration.
 4. Push to the branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
 
-## 📄 License
 
-This project is licensed under the ISC License.
 
 ## 👥 Authors
 
-- Your Name - Initial work
+- Forhad Reza - Initial work
 
 ## 🙏 Acknowledgments
 
@@ -265,5 +263,5 @@ This project is licensed under the ISC License.
 
 ---
 
-For more information, please contact [your-email@example.com]
+For more information, please contact [forhad.bimt@example.com]
 
